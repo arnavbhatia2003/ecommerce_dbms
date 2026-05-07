@@ -1,7 +1,7 @@
 -- ============================================================================
 -- E-COMMERCE DATABASE SCHEMA CREATION
 -- File: 01_schema_creation.sql
--- Description: Creates all 12 tables with constraints and comments
+-- Description: Creates all 13 tables with constraints and comments
 -- Execute Order: 1st
 -- ============================================================================
 
@@ -92,8 +92,10 @@ CREATE TABLE cart_item (
     cart_id INTEGER NOT NULL REFERENCES cart(cart_id) ON DELETE CASCADE,
     product_id INTEGER NOT NULL REFERENCES product(product_id) ON DELETE RESTRICT,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
-    added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(cart_id, product_id)
+    added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    -- NOTE: No UNIQUE(cart_id, product_id) constraint here.
+    -- Duplicate prevention is handled by trg_prevent_duplicate_cart_items trigger,
+    -- which merges quantities instead of raising an error.
 );
 
 COMMENT ON TABLE cart_item IS 'Stores line items in shopping carts';
@@ -176,7 +178,7 @@ CREATE TABLE notification (
 COMMENT ON TABLE notification IS 'Logs system events for audit trail';
 
 -- Audit table for price changes
-CREATE TABLE product_price_audit (
+CREATE TABLE IF NOT EXISTS product_price_audit (
     audit_id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL,
     old_price NUMERIC(10,2),

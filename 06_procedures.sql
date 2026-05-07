@@ -78,11 +78,8 @@ BEGIN
     INSERT INTO shipment (order_id, courier_name, tracking_number, shipment_status)
     VALUES (v_order_id, p_courier_name, v_tracking_number, 'pending');
     
-    -- Create notification
-    INSERT INTO notification (user_id, event_type, message, timestamp)
-    VALUES (p_user_id, 'order_placed', 
-            'Your order #' || v_order_id || ' has been placed successfully. Total: ₹' || v_total_amount,
-            CURRENT_TIMESTAMP);
+    -- NOTE: Notification is created automatically by trg_create_order_notification trigger
+    -- (fires on INSERT INTO orders). Manual INSERT removed to prevent duplicate notifications.
     
     -- Clear cart items
     DELETE FROM cart_item WHERE cart_id = v_cart_id;

@@ -9,30 +9,40 @@
 -- TRANSACTION 1: ORDER PLACEMENT WITH INVENTORY DEDUCTION (COMMIT)
 -- ============================================================================
 
+-- Uses DO block to capture RETURNING order_id into a variable dynamically,
+-- avoiding hardcoded IDs that break on non-fresh databases.
 BEGIN;
 
--- Step 1: Create order
-INSERT INTO orders (user_id, order_date, total_amount, order_status)
-VALUES (5, CURRENT_TIMESTAMP, 1798.00, 'pending')
-RETURNING order_id;  -- Note the returned order_id (assume it's 6)
+DO $$
+DECLARE
+    v_order_id INTEGER;
+BEGIN
+    -- Step 1: Create order and capture the dynamically assigned order_id
+    INSERT INTO orders (user_id, order_date, total_amount, order_status)
+    VALUES (5, CURRENT_TIMESTAMP, 1798.00, 'pending')
+    RETURNING order_id INTO v_order_id;
 
--- Step 2: Insert order items (use the order_id from above)
-INSERT INTO order_item (order_id, product_id, quantity, price_at_purchase)
-VALUES 
-    (6, 7, 2, 799.00),   -- 2 Yoga Mats
-    (6, 1, 1, 599.00);   -- 1 Wireless Mouse
+    -- Step 2: Insert order items using captured order_id
+    INSERT INTO order_item (order_id, product_id, quantity, price_at_purchase)
+    VALUES 
+        (v_order_id, 7, 2, 799.00),   -- 2 Yoga Mats
+        (v_order_id, 1, 1, 599.00);   -- 1 Wireless Mouse
 
--- Step 3: Decrement inventory (with row locking)
-UPDATE product SET stock_quantity = stock_quantity - 2 WHERE product_id = 7;
-UPDATE product SET stock_quantity = stock_quantity - 1 WHERE product_id = 1;
+    -- Step 3: Decrement inventory
+    UPDATE product SET stock_quantity = stock_quantity - 2 WHERE product_id = 7;
+    UPDATE product SET stock_quantity = stock_quantity - 1 WHERE product_id = 1;
 
--- Step 4: Create payment record
-INSERT INTO payment (order_id, payment_method, payment_status, payment_date)
-VALUES (6, 'upi', 'pending', CURRENT_TIMESTAMP);
+    -- Step 4: Create payment record using captured order_id
+    INSERT INTO payment (order_id, payment_method, payment_status, payment_date)
+    VALUES (v_order_id, 'upi', 'pending', CURRENT_TIMESTAMP);
 
--- Step 5: Create shipment record
-INSERT INTO shipment (order_id, courier_name, tracking_number, shipment_status)
-VALUES (6, 'DTDC', 'DT' || FLOOR(RANDOM() * 1000000)::TEXT, 'pending');
+    -- Step 5: Create shipment record using captured order_id
+    INSERT INTO shipment (order_id, courier_name, tracking_number, shipment_status)
+    VALUES (v_order_id, 'DTDC', 'DT' || FLOOR(RANDOM() * 1000000)::TEXT, 'pending');
+
+    -- Step 6: Notification created automatically by trg_create_order_notification
+    RAISE NOTICE 'Order placed with order_id: %', v_order_id;
+END $$;
 
 COMMIT;  -- All steps successful, changes are permanent
 
@@ -42,17 +52,24 @@ COMMIT;  -- All steps successful, changes are permanent
 
 BEGIN;
 
--- Update payment status
+-- Dynamically find the most recent pending order by user 5 (created in Transaction 1)
+-- instead of hardcoding order_id = 6
 UPDATE payment
 SET payment_status = 'completed',
     payment_date = CURRENT_TIMESTAMP
-WHERE order_id = 6;
+WHERE order_id = (
+    SELECT o.order_id FROM orders o
+    JOIN payment p ON o.order_id = p.order_id
+    WHERE o.user_id = 5 AND p.payment_status = 'pending'
+    ORDER BY o.order_date DESC LIMIT 1
+);
 
--- Verify changes before commit
+-- Verify changes before commit (dynamically fetch the same order)
 SELECT o.order_id, o.order_status, p.payment_status
 FROM orders o
 JOIN payment p ON o.order_id = p.order_id
-WHERE o.order_id = 6;
+WHERE o.user_id = 5
+ORDER BY o.order_date DESC LIMIT 1;
 
 COMMIT;  -- Payment and order status updated atomically
 
@@ -82,27 +99,34 @@ SELECT * FROM product_price_audit ORDER BY changed_at DESC LIMIT 5;
 -- TRANSACTION 4: ROLLBACK SCENARIO — INSUFFICIENT STOCK
 -- ============================================================================
 
-BEGIN;
+-- Uses DO block with EXCEPTION handler to demonstrate automatic rollback
+-- when a constraint violation occurs (insufficient stock).
+DO $$
+DECLARE
+    v_order_id INTEGER;
+BEGIN
+    -- Step 1: Create order and capture dynamic order_id
+    INSERT INTO orders (user_id, order_date, total_amount, order_status)
+    VALUES (4, CURRENT_TIMESTAMP, 2499.00, 'pending')
+    RETURNING order_id INTO v_order_id;
 
--- Attempt to create order
-INSERT INTO orders (user_id, order_date, total_amount, order_status)
-VALUES (4, CURRENT_TIMESTAMP, 2499.00, 'pending')
-RETURNING order_id;  -- Assume returns order_id = 7
+    -- Step 2: Insert order item using captured order_id
+    INSERT INTO order_item (order_id, product_id, quantity, price_at_purchase)
+    VALUES (v_order_id, 2, 1, 2499.00);  -- 1 Bluetooth Keyboard
 
--- Attempt to insert order item
-INSERT INTO order_item (order_id, product_id, quantity, price_at_purchase)
-VALUES (7, 2, 1, 2499.00);  -- 1 Bluetooth Keyboard
+    -- Step 3: Check current stock
+    RAISE NOTICE 'Attempting to deduct 100 units from product 2...';
 
--- Check current stock
-SELECT product_id, product_name, stock_quantity 
-FROM product 
-WHERE product_id = 2;
+    -- Step 4: Attempt to decrement inventory by MORE than available
+    -- This will fail due to check constraint or trigger — entire block rolls back
+    UPDATE product SET stock_quantity = stock_quantity - 100 WHERE product_id = 2;
 
--- Attempt to decrement inventory by more than available
--- This will fail due to check constraint or trigger
-UPDATE product SET stock_quantity = stock_quantity - 100 WHERE product_id = 2;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Transaction 4 ROLLED BACK: % (Atomicity demonstrated)', SQLERRM;
+END $$;
 
--- This transaction will automatically rollback due to constraint violation
+-- Verify rollback: the order should NOT exist because the entire block rolled back
 
 -- ============================================================================
 -- TRANSACTION 5: EXPLICIT ROLLBACK
@@ -135,13 +159,14 @@ BEGIN;
 SELECT stock_quantity FROM product WHERE product_id = 10 FOR UPDATE;
 -- Acquires row lock on product 10, blocks other transactions
 
--- Proceed with order placement
-INSERT INTO orders (user_id, order_date, total_amount, order_status)
-VALUES (1, CURRENT_TIMESTAMP, 349.00, 'pending')
-RETURNING order_id;  -- Assume returns 8
-
+-- Use CTE to capture dynamic order_id from INSERT and chain to order_item
+WITH new_order AS (
+    INSERT INTO orders (user_id, order_date, total_amount, order_status)
+    VALUES (1, CURRENT_TIMESTAMP, 349.00, 'pending')
+    RETURNING order_id
+)
 INSERT INTO order_item (order_id, product_id, quantity, price_at_purchase)
-VALUES (8, 10, 1, 349.00);
+SELECT order_id, 10, 1, 349.00 FROM new_order;
 
 UPDATE product SET stock_quantity = stock_quantity - 1 WHERE product_id = 10;
 
